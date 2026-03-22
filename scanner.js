@@ -1,86 +1,136 @@
+const axios = require("axios");
+
 const STOCKS = ["AAPL", "TSLA", "NVDA", "AMD", "META", "PLTR", "AMZN", "MSFT"];
-
-function randomBetween(min, max) {
-  return +(Math.random() * (max - min) + min).toFixed(2);
-}
-
-// 模拟价格
-async function getMockData(symbol) {
-  const baseMap = {
-    AAPL: 215,
-    TSLA: 180,
-    NVDA: 920,
-    AMD: 170,
-    META: 500,
-    PLTR: 30,
-    AMZN: 185,
-    MSFT: 425,
-  };
-
-  const base = baseMap[symbol] || 100;
-
-  const price = randomBetween(base * 0.985, base * 1.02);
-  const vwap = randomBetween(base * 0.99, base * 1.005);
-  const ema9 = randomBetween(base * 0.992, base * 1.01);
-  const ema20 = randomBetween(base * 0.988, base * 1.008);
-  const openingHigh = randomBetween(base * 1.002, base * 1.012);
-  const openingLow = randomBetween(base * 0.988, base * 0.998);
-  const volumeRatio = randomBetween(0.8, 2.8);
-
-  return {
-    symbol,
-    price,
-    vwap,
-    ema9,
-    ema20,
-    openingHigh,
-    openingLow,
-    volumeRatio,
-  };
-}
+const API_KEY = process.env.FINNHUB_API_KEY;
 
 function round(num) {
-  return +num.toFixed(2);
+  return Number(Number(num).toFixed(2));
+}
+
+function getUnixNow() {
+  return Math.floor(Date.now() / 1000);
+}
+
+function ema(values, period) {
+  if (!values || values.length < period) return null;
+
+  const k = 2 / (period + 1);
+  let emaValue = values[0];
+
+  for (let i = 1; i < values.length; i++) {
+    emaValue = values[i] * k + emaValue * (1 - k);
+  }
+
+  return emaValue;
+}
+
+// 用 candle 的 typical price * volume 来近似盘中 VWAP
+function calcApproxVWAP(candles) {
+  let pv = 0;
+  let totalVol = 0;
+
+  for (const c of candles) {
+    const typicalPrice = (c.high + c.low + c.close) / 3;
+    pv += typicalPrice * c.volume;
+    totalVol += c.volume;
+  }
+
+  if (!totalVol) return null;
+  return pv / totalVol;
+}
+
+function calcVolumeRatio(candles) {
+  if (!candles || candles.length < 8) return 1;
+
+  const last = candles[candles.length - 1].volume || 0;
+  const prev = candles.slice(-7, -1);
+  const avgPrev = prev.reduce((sum, c) => sum + (c.volume || 0), 0) / prev.length;
+
+  if (!avgPrev) return 1;
+  return last / avgPrev;
+}
+
+function getOpeningRange(candles, bars = 6) {
+  const firstBars = candles.slice(0, bars);
+  if (!firstBars.length) return { openingHigh: null, openingLow: null };
+
+  const openingHigh = Math.max(...firstBars.map(c => c.high));
+  const openingLow = Math.min(...firstBars.map(c => c.low));
+
+  return { openingHigh, openingLow };
 }
 
 function calcLongLevels(price, openingLow) {
   const stopLoss = round(Math.min(price * 0.992, openingLow * 0.998));
   const risk = round(price - stopLoss);
-
   if (risk <= 0) return null;
-
-  const tp1 = round(price + risk * 1.5);
-  const tp2 = round(price + risk * 2.5);
-  const rr = `1:${round((tp2 - price) / risk)}`;
 
   return {
     entry: round(price),
     stopLoss,
-    tp1,
-    tp2,
-    rr,
-    plan: "等回踩买入区不追高，跌破止损位直接离场",
+    tp1: round(price + risk * 1.5),
+    tp2: round(price + risk * 2.5),
+    rr: `1:${round((risk * 2.5) / risk)}`,
+    plan: "等回踩买入区，不追高；跌破止损位直接离场",
   };
 }
 
 function calcShortLevels(price, openingHigh) {
   const stopLoss = round(Math.max(price * 1.008, openingHigh * 1.002));
   const risk = round(stopLoss - price);
-
   if (risk <= 0) return null;
-
-  const tp1 = round(price - risk * 1.5);
-  const tp2 = round(price - risk * 2.5);
-  const rr = `1:${round((price - tp2) / risk)}`;
 
   return {
     entry: round(price),
     stopLoss,
-    tp1,
-    tp2,
-    rr,
-    plan: "等反弹不追空，站回止损位上方直接离场",
+    tp1: round(price - risk * 1.5),
+    tp2: round(price - risk * 2.5),
+    rr: `1:${round((risk * 2.5) / risk)}`,
+    plan: "等反弹不追空；站回止损位上方直接离场",
   };
+}
+
+async function fetchQuote(symbol) {
+  const url = "https://finnhub.io/api/v1/quote";
+  const { data } = await axios.get(url, {
+    params: {
+      symbol,
+      token: API_KEY,
+    },
+    timeout: 15000,
+  });
+
+  return data;
+}
+
+async function fetchCandles(symbol) {
+  const now = getUnixNow();
+  const from = now - 60 * 60 * 8; // 拉近8小时，足够覆盖盘中
+
+  const url = "https://finnhub.io/api/v1/stock/candle";
+  const { data } = await axios.get(url, {
+    params: {
+      symbol,
+      resolution: 5,
+      from,
+      to: now,
+      token: API_KEY,
+    },
+    timeout: 15000,
+  });
+
+  if (!data || data.s !== "ok" || !Array.isArray(data.c)) {
+    return [];
+  }
+
+  return data.c.map((close, i) => ({
+    close: Number(close),
+    high: Number(data.h[i]),
+    low: Number(data.l[i]),
+    open: Number(data.o[i]),
+    volume: Number(data.v[i]),
+    time: Number(data.t[i]),
+  }));
 }
 
 function evaluateSignal(data) {
@@ -94,70 +144,67 @@ function evaluateSignal(data) {
     volumeRatio,
   } = data;
 
+  if (
+    [price, vwap, ema9, ema20, openingHigh, openingLow, volumeRatio].some(
+      v => v === null || v === undefined || Number.isNaN(v)
+    )
+  ) {
+    return null;
+  }
+
   let longScore = 0;
   let shortScore = 0;
   const longReasons = [];
   const shortReasons = [];
 
-  // LONG 逻辑
   if (price > vwap) {
     longScore += 20;
     longReasons.push("站上VWAP");
   }
-
   if (ema9 > ema20) {
     longScore += 20;
     longReasons.push("EMA9高于EMA20");
   }
-
   if (price > ema9 && price > ema20) {
     longScore += 20;
     longReasons.push("价格强于均线");
   }
-
   if (price > openingHigh) {
     longScore += 25;
     longReasons.push("突破开盘区间高点");
   }
-
   if (volumeRatio >= 1.8) {
     longScore += 20;
-    longReasons.push(`量比放大 ${volumeRatio}x`);
+    longReasons.push(`量比放大 ${round(volumeRatio)}x`);
   } else if (volumeRatio >= 1.4) {
     longScore += 10;
-    longReasons.push(`量比略放大 ${volumeRatio}x`);
+    longReasons.push(`量比略放大 ${round(volumeRatio)}x`);
   }
 
-  // SHORT 逻辑
   if (price < vwap) {
     shortScore += 20;
     shortReasons.push("跌破VWAP");
   }
-
   if (ema9 < ema20) {
     shortScore += 20;
     shortReasons.push("EMA9低于EMA20");
   }
-
   if (price < ema9 && price < ema20) {
     shortScore += 20;
     shortReasons.push("价格弱于均线");
   }
-
   if (price < openingLow) {
     shortScore += 25;
     shortReasons.push("跌破开盘区间低点");
   }
-
   if (volumeRatio >= 1.8) {
     shortScore += 20;
-    shortReasons.push(`量比放大 ${volumeRatio}x`);
+    shortReasons.push(`量比放大 ${round(volumeRatio)}x`);
   } else if (volumeRatio >= 1.4) {
     shortScore += 10;
-    shortReasons.push(`量比略放大 ${volumeRatio}x`);
+    shortReasons.push(`量比略放大 ${round(volumeRatio)}x`);
   }
 
-  // 过滤低质量信号
   if (longScore >= 80 && longScore > shortScore) {
     const levels = calcLongLevels(price, openingLow);
     if (!levels) return null;
@@ -185,25 +232,71 @@ function evaluateSignal(data) {
   return null;
 }
 
+async function buildSymbolData(symbol) {
+  const [quote, candles] = await Promise.all([
+    fetchQuote(symbol),
+    fetchCandles(symbol),
+  ]);
+
+  if (!quote || !quote.c || !candles.length) {
+    return null;
+  }
+
+  const closes = candles.map(c => c.close);
+  const ema9 = ema(closes.slice(-30), 9);
+  const ema20 = ema(closes.slice(-40), 20);
+  const vwap = calcApproxVWAP(candles);
+  const volumeRatio = calcVolumeRatio(candles);
+  const { openingHigh, openingLow } = getOpeningRange(candles, 6);
+
+  return {
+    symbol,
+    price: Number(quote.c),   // 当前价
+    open: Number(quote.o),    // 当日开盘
+    high: Number(quote.h),    // 当日最高
+    low: Number(quote.l),     // 当日最低
+    prevClose: Number(quote.pc), // 前收
+    vwap,
+    ema9,
+    ema20,
+    openingHigh,
+    openingLow,
+    volumeRatio,
+  };
+}
+
 async function scanMarket() {
+  if (!API_KEY) {
+    throw new Error("FINNHUB_API_KEY is missing");
+  }
+
   const results = [];
 
   for (const symbol of STOCKS) {
-    const data = await getMockData(symbol);
-    const signal = evaluateSignal(data);
+    try {
+      const data = await buildSymbolData(symbol);
+      if (!data) continue;
 
-    if (signal) {
+      const signal = evaluateSignal(data);
+      if (!signal) continue;
+
       results.push({
         symbol,
         price: round(data.price),
+        open: round(data.open),
+        high: round(data.high),
+        low: round(data.low),
+        prevClose: round(data.prevClose),
         vwap: round(data.vwap),
         ema9: round(data.ema9),
         ema20: round(data.ema20),
         openingHigh: round(data.openingHigh),
         openingLow: round(data.openingLow),
-        volumeRatio: data.volumeRatio.toFixed(2),
+        volumeRatio: round(data.volumeRatio),
         ...signal,
       });
+    } catch (err) {
+      console.log(`scan ${symbol} failed:`, err.message);
     }
   }
 
