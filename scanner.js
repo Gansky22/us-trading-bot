@@ -158,7 +158,7 @@ function evaluateSignal(data) {
   }
 
   // 过滤低质量信号
-  if (longScore >= 75 && longScore > shortScore) {
+  if (longScore >= 80 && longScore > shortScore) {
     const levels = calcLongLevels(price, openingLow);
     if (!levels) return null;
 
@@ -170,7 +170,7 @@ function evaluateSignal(data) {
     };
   }
 
-  if (shortScore >= 75 && shortScore > longScore) {
+  if (shortScore >= 80 && shortScore > longScore) {
     const levels = calcShortLevels(price, openingHigh);
     if (!levels) return null;
 
@@ -201,7 +201,7 @@ async function scanMarket() {
         ema20: round(data.ema20),
         openingHigh: round(data.openingHigh),
         openingLow: round(data.openingLow),
-        volumeRatio: data.volumeRatio,
+        volumeRatio: data.volumeRatio.toFixed(2),
         ...signal,
       });
     }
