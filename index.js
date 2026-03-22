@@ -9,16 +9,36 @@ app.get("/api/run-scan", async (req, res) => {
     const results = await scanMarket();
 
     if (results.length > 0) {
-      for (let r of results) {
-        await sendTelegram(
-          `🔥 做T机会\n股票: ${r.symbol}\n方向: ${r.side}\n价格: ${r.price}\n原因: ${r.reason}`
-        );
+      for (const r of results) {
+        const msg = [
+          `🔥 美股日内做T信号`,
+          `股票: ${r.symbol}`,
+          `方向: ${r.side}`,
+          `现价: ${r.price}`,
+          `买入价: ${r.entry}`,
+          `止损价: ${r.stopLoss}`,
+          `TP1: ${r.tp1}`,
+          `TP2: ${r.tp2}`,
+          `RR: ${r.rr}`,
+          `评分: ${r.score}`,
+          `原因: ${r.reasons.join(" / ")}`,
+          `执行提醒: ${r.plan}`,
+        ].join("\n");
+
+        await sendTelegram(msg);
       }
     }
 
-    res.json({ ok: true, results });
+    res.json({
+      ok: true,
+      count: results.length,
+      results,
+    });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({
+      ok: false,
+      error: err.message,
+    });
   }
 });
 
@@ -26,4 +46,7 @@ app.get("/api/health", (req, res) => {
   res.json({ status: "running" });
 });
 
-app.listen(3000, () => console.log("Server running"));
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});
