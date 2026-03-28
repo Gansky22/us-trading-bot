@@ -1,6 +1,11 @@
 const axios = require("axios");
 
-const STOCKS = ["AAPL", "TSLA", "NVDA", "AMD", "META", "PLTR", "AMZN", "MSFT"];
+const STOCKS = [
+  "AAPL", "TSLA", "NVDA", "AMD", "META", "PLTR", "AMZN", "MSFT",
+  "NFLX", "GOOGL", "MU", "SMCI", "AVGO", "INTC", "QCOM", "ARM",
+  "COIN", "MARA", "RIOT", "UBER", "SNOW", "SHOP", "CRM", "PANW"
+];
+
 const API_KEY = process.env.FINNHUB_API_KEY;
 
 function round(num) {
@@ -24,7 +29,6 @@ function ema(values, period) {
   return emaValue;
 }
 
-// 用 candle 的 typical price * volume 来近似盘中 VWAP
 function calcApproxVWAP(candles) {
   let pv = 0;
   let totalVol = 0;
@@ -52,7 +56,9 @@ function calcVolumeRatio(candles) {
 
 function getOpeningRange(candles, bars = 6) {
   const firstBars = candles.slice(0, bars);
-  if (!firstBars.length) return { openingHigh: null, openingLow: null };
+  if (!firstBars.length) {
+    return { openingHigh: null, openingLow: null };
+  }
 
   const openingHigh = Math.max(...firstBars.map(c => c.high));
   const openingLow = Math.min(...firstBars.map(c => c.low));
@@ -63,6 +69,7 @@ function getOpeningRange(candles, bars = 6) {
 function calcLongLevels(price, openingLow) {
   const stopLoss = round(Math.min(price * 0.992, openingLow * 0.998));
   const risk = round(price - stopLoss);
+
   if (risk <= 0) return null;
 
   return {
@@ -70,14 +77,15 @@ function calcLongLevels(price, openingLow) {
     stopLoss,
     tp1: round(price + risk * 1.5),
     tp2: round(price + risk * 2.5),
-    rr: `1:${round((risk * 2.5) / risk)}`,
-    plan: "等回踩买入区，不追高；跌破止损位直接离场",
+    rr: `1:${round(2.5)}`,
+    plan: "优先等回踩买入区，不追高；跌破止损位直接离场",
   };
 }
 
 function calcShortLevels(price, openingHigh) {
   const stopLoss = round(Math.max(price * 1.008, openingHigh * 1.002));
   const risk = round(stopLoss - price);
+
   if (risk <= 0) return null;
 
   return {
@@ -85,52 +93,34 @@ function calcShortLevels(price, openingHigh) {
     stopLoss,
     tp1: round(price - risk * 1.5),
     tp2: round(price - risk * 2.5),
-    rr: `1:${round((risk * 2.5) / risk)}`,
-    plan: "等反弹不追空；站回止损位上方直接离场",
+    rr: `1:${round(2.5)}`,
+    plan: "优先等反弹再空，不追空；站回止损位上方直接离场",
   };
 }
 
-async function fetchQuote(symbol) {
-  const url = "https://finnhub.io/api/v1/quote";
-  const { data } = await axios.get(url, {
-    params: {
-      symbol,
-      token: API_KEY,
-    },
-    timeout: 15000,
-  });
-
-  return data;
-}
-
-async function fetchCandles(symbol) {
-  const now = getUnixNow();
-  const from = now - 60 * 60 * 8; // 拉近8小时，足够覆盖盘中
-
-  const url = "https://finnhub.io/api/v1/stock/candle";
-  const { data } = await axios.get(url, {
-    params: {
-      symbol,
-      resolution: 5,
-      from,
-      to: now,
-      token: API_KEY,
-    },
-    timeout: 15000,
-  });
-
-  if (!data || data.s !== "ok" || !Array.isArray(data.c)) {
-    return [];
+function getSignalTier(score) {
+  if (score >= 85) {
+    return {
+      tier: "爆发机会",
+      icon: "💎",
+    };
   }
 
-  return data.c.map((close, i) => ({
-    close: Number(close),
-    high: Number(data.h[i]),
-    low: Number(data.l[i]),
-    open: Number(data.o[i]),
-    volume: Number(data.v[i]),
-    time: Number(data.t[i]),
-  }));
+  if (score >= 70) {
+    return {
+      tier: "强势机会",
+      icon: "🔥",
+    };
+  }
+
+  if (score >= 55) {
+    return {
+      tier: "观察名单",
+      icon: "🟢",
+    };
+  }
+
+  return null;
 }
 
 function evaluateSignal(data) {
@@ -158,78 +148,135 @@ function evaluateSignal(data) {
   const shortReasons = [];
 
   if (price > vwap) {
-    longScore += 20;
+    longScore += 18;
     longReasons.push("站上VWAP");
   }
   if (ema9 > ema20) {
-    longScore += 20;
+    longScore += 18;
     longReasons.push("EMA9高于EMA20");
   }
   if (price > ema9 && price > ema20) {
-    longScore += 20;
+    longScore += 18;
     longReasons.push("价格强于均线");
   }
   if (price > openingHigh) {
-    longScore += 25;
+    longScore += 22;
     longReasons.push("突破开盘区间高点");
   }
-  if (volumeRatio >= 1.8) {
-    longScore += 20;
+  if (volumeRatio >= 2.0) {
+    longScore += 22;
+    longReasons.push(`量比明显放大 ${round(volumeRatio)}x`);
+  } else if (volumeRatio >= 1.5) {
+    longScore += 14;
     longReasons.push(`量比放大 ${round(volumeRatio)}x`);
-  } else if (volumeRatio >= 1.4) {
-    longScore += 10;
+  } else if (volumeRatio >= 1.2) {
+    longScore += 8;
     longReasons.push(`量比略放大 ${round(volumeRatio)}x`);
   }
 
   if (price < vwap) {
-    shortScore += 20;
+    shortScore += 18;
     shortReasons.push("跌破VWAP");
   }
   if (ema9 < ema20) {
-    shortScore += 20;
+    shortScore += 18;
     shortReasons.push("EMA9低于EMA20");
   }
   if (price < ema9 && price < ema20) {
-    shortScore += 20;
+    shortScore += 18;
     shortReasons.push("价格弱于均线");
   }
   if (price < openingLow) {
-    shortScore += 25;
+    shortScore += 22;
     shortReasons.push("跌破开盘区间低点");
   }
-  if (volumeRatio >= 1.8) {
-    shortScore += 20;
+  if (volumeRatio >= 2.0) {
+    shortScore += 22;
+    shortReasons.push(`量比明显放大 ${round(volumeRatio)}x`);
+  } else if (volumeRatio >= 1.5) {
+    shortScore += 14;
     shortReasons.push(`量比放大 ${round(volumeRatio)}x`);
-  } else if (volumeRatio >= 1.4) {
-    shortScore += 10;
+  } else if (volumeRatio >= 1.2) {
+    shortScore += 8;
     shortReasons.push(`量比略放大 ${round(volumeRatio)}x`);
   }
 
-  if (longScore >= 80 && longScore > shortScore) {
+  if (longScore >= 55 && longScore > shortScore) {
     const levels = calcLongLevels(price, openingLow);
     if (!levels) return null;
+
+    const signalTier = getSignalTier(longScore);
+    if (!signalTier) return null;
 
     return {
       side: "LONG",
       score: longScore,
       reasons: longReasons,
+      ...signalTier,
       ...levels,
     };
   }
 
-  if (shortScore >= 80 && shortScore > longScore) {
+  if (shortScore >= 55 && shortScore > longScore) {
     const levels = calcShortLevels(price, openingHigh);
     if (!levels) return null;
+
+    const signalTier = getSignalTier(shortScore);
+    if (!signalTier) return null;
 
     return {
       side: "SHORT",
       score: shortScore,
       reasons: shortReasons,
+      ...signalTier,
       ...levels,
     };
   }
 
   return null;
+}
+
+async function fetchQuote(symbol) {
+  const url = "https://finnhub.io/api/v1/quote";
+  const { data } = await axios.get(url, {
+    params: {
+      symbol,
+      token: API_KEY,
+    },
+    timeout: 15000,
+  });
+
+  return data;
+}
+
+async function fetchCandles(symbol) {
+  const now = getUnixNow();
+  const from = now - 60 * 60 * 8;
+
+  const url = "https://finnhub.io/api/v1/stock/candle";
+  const { data } = await axios.get(url, {
+    params: {
+      symbol,
+      resolution: 5,
+      from,
+      to: now,
+      token: API_KEY,
+    },
+    timeout: 15000,
+  });
+
+  if (!data || data.s !== "ok" || !Array.isArray(data.c)) {
+    return [];
+  }
+
+  return data.c.map((close, i) => ({
+    close: Number(close),
+    high: Number(data.h[i]),
+    low: Number(data.l[i]),
+    open: Number(data.o[i]),
+    volume: Number(data.v[i]),
+    time: Number(data.t[i]),
+  }));
 }
 
 async function buildSymbolData(symbol) {
@@ -251,11 +298,11 @@ async function buildSymbolData(symbol) {
 
   return {
     symbol,
-    price: Number(quote.c),   // 当前价
-    open: Number(quote.o),    // 当日开盘
-    high: Number(quote.h),    // 当日最高
-    low: Number(quote.l),     // 当日最低
-    prevClose: Number(quote.pc), // 前收
+    price: Number(quote.c),
+    open: Number(quote.o),
+    high: Number(quote.h),
+    low: Number(quote.l),
+    prevClose: Number(quote.pc),
     vwap,
     ema9,
     ema20,

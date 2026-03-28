@@ -29,6 +29,35 @@ function calcPosition(entry, stopLoss, accountSize, riskPercent) {
   };
 }
 
+function formatTelegramMessage(r, position) {
+  const lines = [
+    `${r.icon} ${r.tier}`,
+    `股票: ${r.symbol}`,
+    `方向: ${r.side}`,
+    `现价: ${r.price}`,
+    ``,
+    `买入价: ${r.entry}`,
+    `止损价: ${r.stopLoss}`,
+    `TP1: ${r.tp1}`,
+    `TP2: ${r.tp2}`,
+    `RR: ${r.rr}`,
+    ``,
+    `评分: ${r.score}`,
+    `量比: ${r.volumeRatio}x`,
+    `VWAP: ${r.vwap}`,
+    `EMA9 / EMA20: ${r.ema9} / ${r.ema20}`,
+    `原因: ${r.reasons.join(" / ")}`,
+    ``,
+    `建议仓位: ${position.shares} 股`,
+    `单笔风险金额: $${position.riskAmount}`,
+    `每股风险: $${position.perShareRisk}`,
+    ``,
+    `执行提醒: ${r.plan}`,
+  ];
+
+  return lines.join("\n");
+}
+
 app.get("/api/run-scan", async (req, res) => {
   try {
     cleanOldMemory();
@@ -38,18 +67,11 @@ app.get("/api/run-scan", async (req, res) => {
     const skippedSignals = [];
 
     for (const r of results) {
-      if (r.score < 80) {
-        skippedSignals.push({
-          symbol: r.symbol,
-          reason: "score too low",
-        });
-        continue;
-      }
-
       if (!shouldSend(r.symbol, r.side)) {
         skippedSignals.push({
           symbol: r.symbol,
-          reason: "duplicate signal within 50 mins",
+          side: r.side,
+          reason: "duplicate signal within 30 mins",
         });
         continue;
       }
@@ -61,28 +83,7 @@ app.get("/api/run-scan", async (req, res) => {
         RISK_PERCENT
       );
 
-      const msg = [
-        `🔥 美股日内做T信号`,
-        `股票: ${r.symbol}`,
-        `方向: ${r.side}`,
-        `现价: ${r.price}`,
-        ``,
-        `买入价: ${r.entry}`,
-        `止损价: ${r.stopLoss}`,
-        `TP1: ${r.tp1}`,
-        `TP2: ${r.tp2}`,
-        `RR: ${r.rr}`,
-        ``,
-        `评分: ${r.score}`,
-        `量比: ${r.volumeRatio}x`,
-        `原因: ${r.reasons.join(" / ")}`,
-        ``,
-        `建议仓位: ${position.shares} 股`,
-        `单笔风险金额: $${position.riskAmount}`,
-        `每股风险: $${position.perShareRisk}`,
-        ``,
-        `执行提醒: ${r.plan}`,
-      ].join("\n");
+      const msg = formatTelegramMessage(r, position);
 
       await sendTelegram(msg);
 
